@@ -1,0 +1,193 @@
+## PyMol plugin for the CASTp server (http://sts.bioe.uic.edu/castp)
+## CASTpyMOL v3.0
+## (C) 2018 Wei Tian
+##
+## The plugin was suggested by Sebastien Moretti
+## Andrew Binkowski implemented v1.0,
+## and Joe Dundas maintained v2.0.
+## Wei Tian reworked on v2.0 and implemented v3.0. 
+## Matthew D modified this on 04/27/2023 to work with Python3
+
+import requests
+
+try:
+    from Tkinter import *   ## notice capitalized T in Tkinter 
+except ImportError:
+    from tkinter import *   ## notice lowercase 't' in tkinter here
+
+from pymol import cmd
+from tkFileDialog import *
+def __init__(self):
+
+    self.menuBar.addcascademenu('Plugin', 'MyPlugin', 'CASTp file selection',
+                                label='CASTp pocket loader'
+                                )
+   
+    self.menuBar.addmenuitem('MyPlugin', 'command',
+                        'Remote PDB',
+                        label='CASTp by PDB/job ID',
+                        command = lambda s=self : RemotePDB(s) )
+    
+    self.menuBar.addmenuitem('MyPlugin', 'command',
+                        'Local PDB',
+                        label='CASTp from local files',
+                        command = lambda s=self : LocalPDB(s) )
+
+    self.menuBar.addmenuitem('MyPlugin', 'command', 
+                        'FeedbackForm', 
+                        label='Feedback', 
+                        command = lambda s=self : Feedback(s) )
+
+ver = 3.1
+
+
+class Feedback:
+    def __init__(self,app):
+        import tkMessageBox
+        tkMessageBox.showinfo('Feedback','Your feedback is important to us!\nPlease email your feedback about CASTp and/or this plugin to wtian7@uic.edu')        
+
+#######################################################################################################
+# Get pocket information from CASTp web server database.                                              #
+#######################################################################################################
+class RemotePDB:
+
+    def __init__(self,app):
+        if not _valid(ver,app):
+            return
+        
+        from tkinter import simpledialog as tkSimpleDialog
+        import tkMessageBox
+        import requests
+
+
+        import os
+
+        pdburl = 'http://sts.bioe.uic.edu/castp/data/{subdatdir}/{moldir}/{pjid}.pdb'
+        pocurl = 'http://sts.bioe.uic.edu/castp/data/{subdatdir}/{moldir}/tmp/{pjid}.poc'
+        
+        response = requests.get('http://sts.bioe.uic.edu/castp/plugin/path')
+        lines = response.text.splitlines()
+        pdburl = lines[0].strip()
+        pocurl = lines[1].strip()
+
+        
+        pjid = tkSimpleDialog.askstring('PDB Loader','Enter the PDB or Job ID\n', parent=app.root)
+        
+        # user click cancel or close the dialog
+        if pjid is None:
+            return
+
+        pjid = pjid.strip().lower()
+        
+        haserror = False
+        
+        # Get Pocket information from CASTp web server!  Size 4 : full structure file
+        # Size 5 : a single chain structure file
+        if len(pjid) in [4,5,6]:#TODO
+            subdatdir = 'pdb'
+            moldir = pjid[1:3]+'/'+pjid
+        elif len(pjid) == 15:
+            subdatdir = 'tmppdb'
+            moldir = pjid 
+        else:
+            emessage = pjid + ' does not appear to be a PDB code'   
+            haserror = True
+
+        path = pdburl.format(subdatdir=subdatdir, moldir=moldir, pjid=pjid)
+        pocpath = pocurl.format(subdatdir=subdatdir, moldir=moldir, pjid=pjid)
+        
+        # Try to retrieve the files if there are no previous errors.
+        if not haserror:
+            pdb_response = requests.get(path)
+            poc_response = requests.get(pocpath)
+            with open("temp_pdb_file.pdb", "wb") as f:
+                f.write(pdb_response.content)
+            pdbfile = "temp_pdb_file.pdb"
+
+            with open("temp_poc_file.poc", "wb") as f:
+                f.write(poc_response.content)
+            pocfile = "temp_poc_file.poc"
+
+            if(os.path.getsize(pdbfile) < 400 or os.path.getsize(pocfile) < 400):
+                emessage = pjid + ' is not in the CASTp database'
+                haserror = True
+        
+
+        if haserror:
+            tkMessageBox.showerror('Sorry', emessage, parent=app.root)
+            return           
+
+        _showpoc(pjid,pdbfile,pocfile)
+
+
+
+
+
+#######################################################################################################
+# Load pocket information from files on the local machine                                             #
+#######################################################################################################
+class LocalPDB:
+    
+    def __init__(self,app):
+        #if not _valid(ver):
+        #    return
+
+        import tkFileDialog
+        import os
+        pdbfile = tkFileDialog.askopenfilename(parent=app.root, title='Open the structure file\n'+
+            'Within the same directory you must have the corresponding .poc file generated by the CASTp webserver.',
+            filetypes = (("structure file","*.pdb"),("pocket file","*.poc")))
+        
+        # if user click canel or close the window
+        if pdbfile == '':
+            return 
+
+        filedir = os.path.dirname(pdbfile)
+        pdbid = pdbfile.split(os.sep)[-1]
+        pdbid = pdbid[:pdbid.rfind('.')]
+
+        pocfile = filedir + os.sep + pdbid + '.poc'
+        _showpoc(pdbid, pdbfile, pocfile)
+
+
+
+
+def _showpoc(pjid,pdbfile,pocfile):
+    # Load the file
+    cmd.load(pdbfile, pjid)
+    with open(pocfile) as f:
+        lines = f.readlines()
+    
+    pocdict = {}
+    for line in lines:
+        if not line.strip():
+            continue
+        atmid = line[6:11].strip()
+        pocid = int(line[67:70].strip())
+        if pocid not in pocdict:
+            pocdict[pocid] = []
+        pocdict[pocid].append(atmid)
+    
+    for pocid in sorted(pocdict.keys()):
+        atomlist = pocdict[pocid]
+        subsize = 20
+        prefix = ''
+        while len(atomlist)>0:
+            sublist = atomlist[:min(subsize,len(atomlist))]
+            atomlist = atomlist[min(subsize,len(atomlist)):]
+            cmd.do("select {selid}, {prefix} id {sele},1,1".format(selid='Poc'+str(pocid).zfill(4), sele='+'.join(sublist), prefix=prefix))
+            prefix = selid='Poc'+str(pocid).zfill(4) + ' or '
+
+
+def _valid(currver,app):
+    import requests
+    import tkMessageBox
+    
+    response = requests.get('http://sts.bioe.uic.edu/castp/plugin/version')
+    oldestver = response.text.splitlines()[0]
+
+    if currver < float(oldestver):
+        tkMessageBox.showerror('Sorry', 'This plugin is out-of-date\nPlease download the latest plugin from the CASTp server.', parent=app.root)
+        return False
+    return True
+
